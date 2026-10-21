@@ -1512,7 +1512,62 @@ pub fn copy_chrome_profile(
         return Err(format!("Failed to copy profile: {}", e));
     }
 
+    if let Err(e) = sanitize_copied_chrome_profile(&dst_profile) {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        return Err(format!("Failed to prepare copied profile: {}", e));
+    }
+
     Ok(temp_dir)
+}
+
+/// Prevent a copied Chrome profile from restoring the source browser's old
+/// window after the temporary profile is launched.
+fn sanitize_copied_chrome_profile(profile_dir: &Path) -> Result<(), String> {
+    let preferences_path = profile_dir.join("Preferences");
+    match std::fs::read_to_string(&preferences_path) {
+        Ok(contents) => {
+            let mut preferences: serde_json::Value = serde_json::from_str(&contents)
+                .map_err(|e| format!("Failed to parse {}: {}", preferences_path.display(), e))?;
+            if let Some(profile) = preferences
+                .get_mut("profile")
+                .and_then(|v| v.as_object_mut())
+            {
+                profile.insert(
+                    "exit_type".to_string(),
+                    serde_json::Value::String("Normal".to_string()),
+                );
+                let updated = serde_json::to_vec(&preferences).map_err(|e| {
+                    format!("Failed to serialize {}: {}", preferences_path.display(), e)
+                })?;
+                std::fs::write(&preferences_path, updated).map_err(|e| {
+                    format!("Failed to update {}: {}", preferences_path.display(), e)
+                })?;
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(format!(
+                "Failed to read {}: {}",
+                preferences_path.display(),
+                e
+            ));
+        }
+    }
+
+    let sessions_dir = profile_dir.join("Sessions");
+    match std::fs::remove_dir_all(&sessions_dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(format!(
+                "Failed to remove {}: {}",
+                sessions_dir.display(),
+                e
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// Recursively copies a directory, skipping entries in [`PROFILE_COPY_EXCLUDE_DIRS`].
@@ -2733,6 +2788,32 @@ exec sleep 60
             "fake-leveldb"
         );
         assert!(!temp.join("Default/Cache").exists());
+    }
+
+    #[test]
+    fn test_copy_chrome_profile_does_not_restore_old_session() {
+        let src = TempDir::new("copy-session-src");
+        create_fake_local_state(&src, &[("Default", "Person 1")]);
+        create_fake_profile(&src, "Default");
+        std::fs::write(
+            src.join("Default/Preferences"),
+            r#"{"profile":{"exit_type":"Crashed","name":"Person 1"},"keep":true}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(src.join("Default/Sessions")).unwrap();
+        std::fs::write(src.join("Default/Sessions/Session_123"), "old-session").unwrap();
+
+        let temp_path = copy_chrome_profile(&src, "Default").unwrap();
+        let temp = TempDir(temp_path);
+
+        let preferences: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(temp.join("Default/Preferences")).unwrap())
+                .unwrap();
+        assert_eq!(preferences["profile"]["exit_type"], "Normal");
+        assert_eq!(preferences["profile"]["name"], "Person 1");
+        assert_eq!(preferences["keep"], true);
+        assert!(!temp.join("Default/Sessions").exists());
+        assert!(temp.join("Default/Cookies").is_file());
     }
 
     #[test]
