@@ -1428,6 +1428,12 @@ pub struct InitialRecordingFrame {
     pub pixel_height: u32,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct CaptureWindowBounds {
+    window_id: Value,
+    bounds: Value,
+}
+
 pub fn start_screencast_params(initial_frame: &InitialRecordingFrame) -> Value {
     json!({
         "format": "png",
@@ -1443,6 +1449,30 @@ pub async fn set_capture_contents_size(
     width: u32,
     height: u32,
 ) -> Result<(), String> {
+    let original_bounds = capture_window_bounds(client, target_id).await?;
+    set_capture_contents_size_for_window(client, &original_bounds.window_id, width, height).await
+}
+
+async fn set_capture_contents_size_for_window(
+    client: &CdpClient,
+    window_id: &Value,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
+    client
+        .send_command(
+            "Browser.setContentsSize",
+            Some(json!({ "windowId": window_id, "width": width, "height": height })),
+            None,
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn capture_window_bounds(
+    client: &CdpClient,
+    target_id: &str,
+) -> Result<CaptureWindowBounds, String> {
     let window = client
         .send_command(
             "Browser.getWindowForTarget",
@@ -1452,11 +1482,31 @@ pub async fn set_capture_contents_size(
         .await?;
     let window_id = window
         .get("windowId")
+        .cloned()
         .ok_or("Browser.getWindowForTarget returned no windowId")?;
+    let result = client
+        .send_command(
+            "Browser.getWindowBounds",
+            Some(json!({ "windowId": window_id })),
+            None,
+        )
+        .await?;
+    let bounds = result
+        .get("bounds")
+        .filter(|bounds| bounds.is_object())
+        .cloned()
+        .ok_or("Browser.getWindowBounds returned no bounds")?;
+    Ok(CaptureWindowBounds { window_id, bounds })
+}
+
+pub async fn restore_window_bounds(
+    client: &CdpClient,
+    original: &CaptureWindowBounds,
+) -> Result<(), String> {
     client
         .send_command(
-            "Browser.setContentsSize",
-            Some(json!({ "windowId": window_id, "width": width, "height": height })),
+            "Browser.setWindowBounds",
+            Some(json!({ "windowId": original.window_id, "bounds": original.bounds })),
             None,
         )
         .await?;
@@ -1536,25 +1586,33 @@ pub fn spawn_recording_task(
         let seeded = seed_recording_outputs(&frame_tx, contact_tx.as_ref(), frame).await;
         shared_captured.fetch_add(1, Ordering::Relaxed);
 
+        let mut original_window_bounds = None;
         let started = match seeded {
-            Ok(()) => match set_capture_contents_size(
-                &client,
-                &target_id,
-                initial_frame.pixel_width,
-                initial_frame.pixel_height,
-            )
-            .await
-            {
-                Ok(()) => client
+            Ok(()) => {
+                if let Ok(bounds) = capture_window_bounds(&client, &target_id).await {
+                    match set_capture_contents_size_for_window(
+                        &client,
+                        &bounds.window_id,
+                        initial_frame.pixel_width,
+                        initial_frame.pixel_height,
+                    )
+                    .await
+                    {
+                        Ok(()) => original_window_bounds = Some(bounds),
+                        Err(_) => {
+                            let _ = restore_window_bounds(&client, &bounds).await;
+                        }
+                    }
+                }
+                client
                     .send_command(
                         "Page.startScreencast",
                         Some(start_params),
                         Some(&capture_session),
                     )
                     .await
-                    .map_err(|error| format!("Failed to start screencast: {error}")),
-                Err(error) => Err(format!("Failed to set recording capture size: {error}")),
-            },
+                    .map_err(|error| format!("Failed to start screencast: {error}"))
+            }
             Err(error) => Err(error),
         };
 
@@ -1582,13 +1640,9 @@ pub fn spawn_recording_task(
             client.send_command_no_params("Page.stopScreencast", Some(&capture_session)),
         )
         .await;
-        let _ = set_capture_contents_size(
-            &client,
-            &target_id,
-            initial_frame.device_width as u32,
-            initial_frame.device_height as u32,
-        )
-        .await;
+        if let Some(bounds) = &original_window_bounds {
+            let _ = restore_window_bounds(&client, bounds).await;
+        }
         remove_cursor_overlays(&client, &cursor_overlays).await;
         detach_capture_session(&client, &capture_session).await;
 

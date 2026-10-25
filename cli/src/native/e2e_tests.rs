@@ -9502,11 +9502,30 @@ async fn e2e_recording_default_records_active_page() {
     assert_success(&resp);
 
     let resp = execute_command(
-        &json!({ "id": "3", "action": "viewport", "width": 800, "height": 600 }),
+        &json!({ "id": "3", "action": "viewport", "width": 400, "height": 300, "deviceScaleFactor": 2.0 }),
         &mut state,
     )
     .await;
     assert_success(&resp);
+
+    let (client, session_id) = {
+        let browser = state.browser.as_ref().unwrap();
+        (
+            browser.client.clone(),
+            browser.active_session_id().unwrap().to_string(),
+        )
+    };
+    let target = client
+        .send_command_no_params("Target.getTargetInfo", Some(&session_id))
+        .await
+        .unwrap();
+    let target_id = target["targetInfo"]["targetId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let original_bounds = super::recording::capture_window_bounds(&client, &target_id)
+        .await
+        .unwrap();
 
     // In-memory page state: a cold navigation or a new page would lose this.
     let resp = execute_command(
@@ -9565,7 +9584,7 @@ async fn e2e_recording_default_records_active_page() {
     )
     .await;
     assert_success(&resp);
-    assert_eq!(get_data(&resp)["result"], json!([800, 600]));
+    assert_eq!(get_data(&resp)["result"], json!([400, 300]));
 
     let resp = execute_command(
         &json!({ "id": "10", "action": "recording_stop" }),
@@ -9577,6 +9596,18 @@ async fn e2e_recording_default_records_active_page() {
         get_data(&resp)["frames"].as_u64().unwrap_or(0) > 0,
         "recorder attached to the active page should have captured frames"
     );
+
+    let restored_bounds = super::recording::capture_window_bounds(&client, &target_id)
+        .await
+        .unwrap();
+    assert_eq!(restored_bounds, original_bounds);
+    let resp = execute_command(
+        &json!({ "id": "11", "action": "evaluate", "script": "[window.innerWidth, window.innerHeight]" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["result"], json!([400, 300]));
 
     let _ = std::fs::remove_file(&rec_path);
     let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
@@ -10386,6 +10417,9 @@ async fn e2e_recording_screencast_preserves_device_scale_factor() {
         .await
         .unwrap();
     let target_id = target["targetInfo"]["targetId"].as_str().unwrap();
+    let original_bounds = super::recording::capture_window_bounds(&browser.client, target_id)
+        .await
+        .unwrap();
     super::recording::set_capture_contents_size(&browser.client, target_id, 800, 600)
         .await
         .unwrap();
@@ -10441,9 +10475,23 @@ async fn e2e_recording_screencast_preserves_device_scale_factor() {
         .client
         .send_command_no_params("Page.stopScreencast", Some(&capture_session))
         .await;
-    super::recording::set_capture_contents_size(&browser.client, target_id, 400, 300)
+    super::recording::restore_window_bounds(&browser.client, &original_bounds)
         .await
         .unwrap();
+    let restored_bounds = super::recording::capture_window_bounds(&browser.client, target_id)
+        .await
+        .unwrap();
+    assert_eq!(restored_bounds, original_bounds);
+    let viewport = browser
+        .client
+        .send_command(
+            "Runtime.evaluate",
+            Some(json!({ "expression": "[innerWidth, innerHeight]", "returnByValue": true })),
+            Some(page_session),
+        )
+        .await
+        .unwrap();
+    assert_eq!(viewport["result"]["value"], json!([400, 300]));
     browser.client.unsubscribe_session(&capture_session);
     super::recording::detach_capture_session(&browser.client, &capture_session).await;
     assert_success(&execute_command(&json!({ "action": "close" }), &mut state).await);
