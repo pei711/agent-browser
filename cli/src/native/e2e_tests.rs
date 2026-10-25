@@ -3514,7 +3514,7 @@ async fn e2e_press_chord_dispatches_modifier_key_events() {
         "data:text/html,<html><body><canvas id='canvas' tabindex='0'></canvas><script>",
         "window.events=[];const c=document.getElementById('canvas');",
         "for(const type of ['keydown','keyup'])c.addEventListener(type,e=>",
-        "events.push({type,key:e.key,ctrlKey:e.ctrlKey}));c.focus();",
+        "events.push({type,key:e.key,code:e.code,keyCode:e.keyCode,ctrlKey:e.ctrlKey,shiftKey:e.shiftKey}));c.focus();",
         "</script></body></html>"
     );
     let resp = execute_command(
@@ -3540,10 +3540,10 @@ async fn e2e_press_chord_dispatches_modifier_key_events() {
     assert_eq!(
         get_data(&resp)["result"],
         json!([
-            { "type": "keydown", "key": "Control", "ctrlKey": true },
-            { "type": "keydown", "key": "l", "ctrlKey": true },
-            { "type": "keyup", "key": "l", "ctrlKey": true },
-            { "type": "keyup", "key": "Control", "ctrlKey": true },
+            { "type": "keydown", "key": "Control", "code": "ControlLeft", "keyCode": 17, "ctrlKey": true, "shiftKey": false },
+            { "type": "keydown", "key": "l", "code": "KeyL", "keyCode": 76, "ctrlKey": true, "shiftKey": false },
+            { "type": "keyup", "key": "l", "code": "KeyL", "keyCode": 76, "ctrlKey": true, "shiftKey": false },
+            { "type": "keyup", "key": "Control", "code": "ControlLeft", "keyCode": 17, "ctrlKey": false, "shiftKey": false },
         ])
     );
 
