@@ -13,12 +13,13 @@
  * (bin/agent-browser.js) then performs the same linking on its first run.
  */
 
-import { existsSync, mkdirSync, chmodSync, createWriteStream, realpathSync, unlinkSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, chmodSync, createWriteStream, realpathSync, renameSync, unlinkSync, writeFileSync } from 'fs';
 import { basename, dirname, isAbsolute, join, sep } from 'path';
 import { fileURLToPath } from 'url';
 import { platform, arch, tmpdir } from 'os';
 import { get } from 'https';
 import { execSync } from 'child_process';
+import { randomUUID } from 'crypto';
 import { findNativeBinary, nativeTarget } from './native.js';
 import { linkNative } from './link-native.js';
 
@@ -42,34 +43,89 @@ const version = packageJson.version;
 const GITHUB_REPO = 'vercel-labs/agent-browser';
 const DOWNLOAD_URL = `https://github.com/${GITHUB_REPO}/releases/download/v${version}/${binaryName}`;
 
-async function downloadFile(url, dest) {
+export async function downloadFile(url, dest, makeRequest = get) {
+  const tempPath = `${dest}.${randomUUID()}.tmp`;
+
   return new Promise((resolve, reject) => {
-    const file = createWriteStream(dest);
-    
-    const request = (url) => {
-      get(url, (response) => {
-        // Handle redirects
-        if (response.statusCode === 301 || response.statusCode === 302) {
-          request(response.headers.location);
-          return;
-        }
-        
-        if (response.statusCode !== 200) {
-          reject(new Error(`Failed to download: HTTP ${response.statusCode}`));
-          return;
-        }
-        
-        response.pipe(file);
-        file.on('finish', () => {
-          file.close();
-          resolve();
-        });
-      }).on('error', (err) => {
-        unlinkSync(dest);
-        reject(err);
-      });
+    let file;
+    let settled = false;
+
+    const removeTempFile = () => {
+      try {
+        unlinkSync(tempPath);
+      } catch {}
     };
-    
+
+    const fail = (err) => {
+      if (settled) return;
+      settled = true;
+      if (file && !file.closed) {
+        file.once('close', removeTempFile);
+        file.destroy();
+      } else {
+        removeTempFile();
+      }
+      reject(err);
+    };
+
+    const request = (requestUrl, redirects = 0) => {
+      const req = makeRequest(requestUrl, (response) => {
+        // Handle redirects without opening the destination file.
+        if (response.statusCode === 301 || response.statusCode === 302) {
+          response.resume();
+          if (!response.headers.location || redirects >= 10) {
+            fail(new Error('Failed to download: too many or invalid redirects'));
+            return;
+          }
+          request(new URL(response.headers.location, requestUrl).href, redirects + 1);
+          return;
+        }
+
+        if (response.statusCode !== 200) {
+          response.resume();
+          fail(new Error(`Failed to download: HTTP ${response.statusCode}`));
+          return;
+        }
+
+        file = createWriteStream(tempPath, { flags: 'wx' });
+        file.once('error', fail);
+        response.once('error', fail);
+        response.once('aborted', () => fail(new Error('Failed to download: response aborted')));
+        response.once('close', () => {
+          if (response.complete === false) {
+            fail(new Error('Failed to download: incomplete response'));
+          }
+        });
+        file.once('finish', () => {
+          file.close((err) => {
+            if (err) {
+              fail(err);
+              return;
+            }
+
+            try {
+              if (file.bytesWritten === 0) {
+                throw new Error('Failed to download: empty response body');
+              }
+              try {
+                unlinkSync(dest);
+              } catch (unlinkError) {
+                if (unlinkError.code !== 'ENOENT') throw unlinkError;
+              }
+              renameSync(tempPath, dest);
+              settled = true;
+              resolve();
+            } catch (renameError) {
+              fail(renameError);
+            }
+          });
+        });
+        response.pipe(file);
+      });
+
+      req.once('error', fail);
+    };
+
     request(url);
   });
 }
@@ -305,4 +361,6 @@ function fixGlobalInstallBin(binary) {
   }
 }
 
-main().catch(console.error);
+if (process.argv[1] && fileURLToPath(import.meta.url) === realpathOrSelf(process.argv[1])) {
+  main().catch(console.error);
+}

@@ -47,7 +47,7 @@ async function writePlatformPackage(packageRoot, packageName, file, marker) {
   return join(directory, 'bin', file);
 }
 
-async function runLauncher(t, { platform, arch, binaries = [], platformPackage, args }) {
+async function runLauncher(t, { platform, arch, binaries = [], emptyBinaries = [], platformPackage, args }) {
   const packageRoot = await createPackage(t);
   const bootstrapPath = join(packageRoot, 'bootstrap.mjs');
 
@@ -66,6 +66,9 @@ await import('./bin/agent-browser.js');
   );
   for (const { name, marker } of binaries) {
     await writeFakeBinary(join(packageRoot, 'bin', name), marker);
+  }
+  for (const name of emptyBinaries) {
+    await writeFile(join(packageRoot, 'bin', name), '');
   }
   if (platformPackage) {
     await writePlatformPackage(packageRoot, platformPackage.name, platformPackage.file, platformPackage.marker);
@@ -151,6 +154,19 @@ test('Linux launcher runs the binary from the platform package', async (t) => {
 
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(result.stdout.trim().split('\n'), ['platform-package-ran', ...args]);
+});
+
+test('launcher skips an empty downloaded binary and uses the platform package', async (t) => {
+  const result = await runLauncher(t, {
+    platform: 'linux',
+    arch: 'x64',
+    emptyBinaries: ['agent-browser-linux-gnu-x64'],
+    platformPackage: { name: '@agent-browser/cli-linux-x64-gnu', file: 'agent-browser', marker: 'platform-package-ran' },
+    args: ['--version'],
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.stdout.trim().split('\n'), ['platform-package-ran', '--version']);
 });
 
 test('Windows launcher runs the binary from the platform package', async (t) => {

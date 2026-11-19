@@ -5,7 +5,7 @@
  * subprocesses because the launcher imports it on every wrapped invocation.
  */
 
-import { existsSync } from 'fs';
+import { existsSync, statSync } from 'fs';
 import { createRequire } from 'module';
 import { dirname, join } from 'path';
 import { platform, arch } from 'os';
@@ -86,7 +86,7 @@ export function platformPackageBinary(packageRoot, target) {
     const require = createRequire(join(packageRoot, 'package.json'));
     const manifest = require.resolve(`${target.packageName}/package.json`);
     const binary = join(dirname(manifest), 'bin', target.file);
-    return existsSync(binary) ? binary : null;
+    return isNonEmptyFile(binary) ? binary : null;
   } catch {
     return null;
   }
@@ -96,7 +96,16 @@ export function platformPackageBinary(packageRoot, target) {
 export function findNativeBinary(packageRoot, target) {
   for (const name of target.candidates) {
     const binary = join(packageRoot, 'bin', name);
-    if (existsSync(binary)) return binary;
+    if (isNonEmptyFile(binary)) return binary;
   }
   return platformPackageBinary(packageRoot, target);
+}
+
+function isNonEmptyFile(path) {
+  try {
+    const stats = statSync(path);
+    return stats.isFile() && stats.size > 0;
+  } catch {
+    return false;
+  }
 }
